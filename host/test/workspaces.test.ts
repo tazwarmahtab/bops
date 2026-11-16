@@ -37,3 +37,22 @@ test("creates a workspace, rejects a duplicate name, and lists desktops", async 
   assert.deepEqual(await domains.json(), { registrar: false, enabled: false, domains: [] });
   await plane.close();
 });
+
+test("project domains ignore Incus and still 404 unknown ids", async () => {
+  const plane = await withPlane();
+  const made = await fetch(`${plane.base}/api/workspaces`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Domains" }),
+  });
+  assert.equal(made.status, 200);
+  const { id } = (await made.json()) as { id: string };
+  plane.driver.versionError = new Error("incus down");
+  const domains = await fetch(`${plane.base}/api/projects/${id}/domains`, { headers: plane.auth });
+  assert.equal(domains.status, 200);
+  assert.deepEqual(await domains.json(), { registrar: false, enabled: false, domains: [] });
+  const missing = await fetch(`${plane.base}/api/projects/no-such-ws/domains`, { headers: plane.auth });
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { error: "not found" });
+  await plane.close();
+});

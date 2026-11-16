@@ -210,8 +210,11 @@ export async function workspaceRoutes(
     }
     if (rest === "/domains") {
       if (method === "GET") {
-        const state = await requireReady(store, driver, res);
-        if (!state) return 503;
+        const state = await store.read();
+        if ("error" in state) {
+          sendJson(res, 503, { code: "state_unreadable", error: "state unreadable" });
+          return 503;
+        }
         if (!findWorkspace(state, projectId)) {
           sendJson(res, 404, { error: "not found" });
           return 404;
