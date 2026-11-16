@@ -19,6 +19,7 @@ export async function withPlane(opts: { driver?: IncusDriver; now?: () => number
     driver,
     statePath,
     auth: { authorization: `Bearer ${ACCOUNT}` },
+    tick: plane.tick,
     close: async () => {
       await plane.close();
       await rm(dir, { recursive: true, force: true });

@@ -10,7 +10,9 @@ import { computerRoutes } from "./routes/computers.ts";
 import { sizeRoutes } from "./routes/size.ts";
 import { workspaceRoutes } from "./routes/workspaces.ts";
 import { logLine } from "./log.ts";
+import { routineRoutes } from "./routes/routines.ts";
 import { emptyFile, openStore, type Store } from "./state.ts";
+import { bindWake, tick } from "./wake.ts";
 
 export type StartOpts = {
   driver: IncusDriver;
@@ -25,7 +27,11 @@ type RunningOpts = StartOpts & { store: Store };
 
 export function start(opts: StartOpts) {
   const store = openStore(opts.statePath);
+  bindWake({ store, driver: opts.driver });
   const running: RunningOpts = { ...opts, store };
+  if (opts.port !== 0) {
+    setInterval(() => void tick(opts.now()), 60_000);
+  }
   const server = createServer((req, res) => {
     void handle(running, req, res);
   });
@@ -43,6 +49,7 @@ export function start(opts: StartOpts) {
         });
       }),
     close: () => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
+    tick,
   };
 }
 
@@ -247,6 +254,20 @@ async function handle(opts: RunningOpts, req: IncomingMessage, res: ServerRespon
     const sizeStatus = await sizeRoutes(actor, req.method ?? "GET", url.pathname, req, res);
     if (sizeStatus !== null) {
       status = sizeStatus;
+      return;
+    }
+
+    const routineStatus = await routineRoutes(
+      opts.store,
+      actor,
+      req.method ?? "GET",
+      url.pathname,
+      req,
+      res,
+      opts.now,
+    );
+    if (routineStatus !== null) {
+      status = routineStatus;
       return;
     }
 
