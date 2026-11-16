@@ -2,6 +2,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { who } from "./auth.ts";
 import type { IncusDriver } from "./incus.ts";
 import { HttpError, sendJson } from "./http.ts";
+import { closedRoutes } from "./routes/closed.ts";
+import { settingsRoutes } from "./routes/settings.ts";
 import { logLine } from "./log.ts";
 import { emptyFile, openStore, type Store } from "./state.ts";
 
@@ -94,23 +96,27 @@ async function handle(opts: RunningOpts, req: IncomingMessage, res: ServerRespon
     }
 
     const state = await opts.store.read();
-    if ("error" in state) {
-      const actor = who(token, opts.accountKey, emptyFile());
-      if (actor?.kind === "account") {
-        status = 404;
-        sendJson(res, 404, { error: "not found" });
-        return;
-      }
-      status = 401;
-      sendJson(res, 401, { error: "unauthorized" });
-      return;
-    }
-    const actor = who(token, opts.accountKey, state);
+    const actorFile = "error" in state ? emptyFile() : state;
+    const actor = who(token, opts.accountKey, actorFile);
     if (!actor || actor.kind === "computer") {
       status = 401;
       sendJson(res, 401, { error: "unauthorized" });
       return;
     }
+
+    const closed = closedRoutes(req.method ?? "GET", url.pathname);
+    if (closed) {
+      status = closed.status;
+      sendJson(res, closed.status, closed.body);
+      return;
+    }
+
+    const settingsStatus = await settingsRoutes(opts.store, req.method ?? "GET", url.pathname, req, res);
+    if (settingsStatus !== null) {
+      status = settingsStatus;
+      return;
+    }
+
     status = 404;
     sendJson(res, 404, { error: "not found" });
   } catch (e) {
