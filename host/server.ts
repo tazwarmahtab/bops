@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { who } from "./auth.ts";
 import type { IncusDriver } from "./incus.ts";
 import { HttpError, sendJson } from "./http.ts";
 import { logLine } from "./log.ts";
-import { openStore } from "./state.ts";
+import { emptyFile, openStore, type Store } from "./state.ts";
 
 export type StartOpts = {
   driver: IncusDriver;
@@ -13,9 +14,13 @@ export type StartOpts = {
   accountKey: string;
 };
 
+type RunningOpts = StartOpts & { store: Store };
+
 export function start(opts: StartOpts) {
+  const store = openStore(opts.statePath);
+  const running: RunningOpts = { ...opts, store };
   const server = createServer((req, res) => {
-    void handle(opts, req, res);
+    void handle(running, req, res);
   });
   return {
     server,
@@ -30,14 +35,14 @@ export function start(opts: StartOpts) {
   };
 }
 
-async function handle(opts: StartOpts, req: IncomingMessage, res: ServerResponse) {
+async function handle(opts: RunningOpts, req: IncomingMessage, res: ServerResponse) {
   const started = Date.now();
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   let status = 500;
   let template = url.pathname;
   try {
     if (req.method === "GET" && url.pathname === "/health") {
-      const state = await openStore(opts.statePath).read();
+      const state = await opts.store.read();
       if ("error" in state) {
         status = 503;
         sendJson(res, 503, { ok: false, code: "state_unreadable" });
@@ -55,7 +60,53 @@ async function handle(opts: StartOpts, req: IncomingMessage, res: ServerResponse
     }
     const header = req.headers.authorization ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-    if (!token || token !== opts.accountKey) {
+    if (!token) {
+      status = 401;
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/user/profile") {
+      const state = await opts.store.read();
+      if ("error" in state) {
+        status = 503;
+        sendJson(res, 503, { code: "state_unreadable", error: "state unreadable" });
+        return;
+      }
+      const actor = who(token, opts.accountKey, state);
+      if (!actor) {
+        status = 401;
+        sendJson(res, 401, { error: "unauthorized" });
+        return;
+      }
+      if (actor.kind === "account") {
+        status = 200;
+        sendJson(res, 200, { id: "local", full_name: "Local", api_key: { scope: "account" } });
+        return;
+      }
+      await opts.store.update((file) => {
+        const key = file.keys[actor.keyId];
+        if (key) key.lastUsed = new Date(opts.now()).toISOString();
+      });
+      status = 200;
+      sendJson(res, 200, { id: "local", api_key: { scope: "computer", computer_id: actor.computerId } });
+      return;
+    }
+
+    const state = await opts.store.read();
+    if ("error" in state) {
+      const actor = who(token, opts.accountKey, emptyFile());
+      if (actor?.kind === "account") {
+        status = 404;
+        sendJson(res, 404, { error: "not found" });
+        return;
+      }
+      status = 401;
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    const actor = who(token, opts.accountKey, state);
+    if (!actor || actor.kind === "computer") {
       status = 401;
       sendJson(res, 401, { error: "unauthorized" });
       return;
