@@ -41,6 +41,41 @@ function diskGbFromPools(pools: Record<string, unknown>): number {
   return free === null ? 0 : Math.floor(free / 1e9);
 }
 
+export function incusInstanceName(displayName: string): string {
+  let slug = displayName
+    .trim()
+    .replace(/[^A-Za-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!slug || !/^[A-Za-z]/.test(slug)) {
+    const tail = slug.length > 0 ? slug : "x";
+    slug = `bops-${tail}`.replace(/[^A-Za-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  }
+  if (!/^[A-Za-z]/.test(slug)) slug = `bops-${slug || "x"}`;
+  slug = slug.slice(0, 63);
+  if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(slug)) slug = "bops-x";
+  return slug;
+}
+
+export function createInstanceArgv(
+  binary: string,
+  input: { image: string; name: string; cpu: number; ramMb: number; diskGb: number },
+): string[] {
+  const instance = incusInstanceName(input.name);
+  return [
+    binary,
+    "init",
+    input.image,
+    instance,
+    "-c",
+    `limits.cpu=${input.cpu}`,
+    "-c",
+    `limits.memory=${input.ramMb}MiB`,
+    "-d",
+    `root,size=${input.diskGb}GiB`,
+  ];
+}
+
 export function parseIncusFree(resources: unknown, storage?: unknown): { ramMb: number; diskGb: number } {
   let ramMb = 0;
   let diskGb = 0;
@@ -130,19 +165,10 @@ export function cliDriver(binary = "incus"): IncusDriver {
     },
 
     async create(input) {
-      const result = await run([
-        "launch",
-        input.image,
-        input.name,
-        "-c",
-        `limits.cpu=${input.cpu}`,
-        "-c",
-        `limits.memory=${input.ramMb}MiB`,
-        "-d",
-        `root,size=${input.diskGb}GiB`,
-      ]);
+      const instance = incusInstanceName(input.name);
+      const result = await run(createInstanceArgv(binary, input));
       if (result.exitCode !== 0) throw new Error(result.stderr || "create failed");
-      return { instance: input.name };
+      return { instance };
     },
 
     async start(instance) {
@@ -166,9 +192,10 @@ export function cliDriver(binary = "incus"): IncusDriver {
     },
 
     async clone(instance, name) {
-      const result = await run(["copy", instance, name]);
+      const target = incusInstanceName(name);
+      const result = await run(["copy", instance, target]);
       if (result.exitCode !== 0) throw new Error(result.stderr || "clone failed");
-      return { instance: name };
+      return { instance: target };
     },
 
     async resizeDisk(instance, diskGb) {

@@ -182,6 +182,36 @@ export async function workspaceRoutes(
   const projectId = projectIdFrom(path);
   if (projectId) {
     const rest = path.slice(`/api/projects/${projectId}`.length);
+    if (rest === "" && method === "PATCH") {
+      requireAccount(actor);
+      const state = await store.read();
+      if ("error" in state) {
+        sendJson(res, 503, { code: "state_unreadable", error: "state unreadable" });
+        return 503;
+      }
+      const ws = findWorkspace(state, projectId);
+      if (!ws) {
+        sendJson(res, 404, { error: "not found" });
+        return 404;
+      }
+      const body = await readJson(req);
+      const name = typeof body.name === "string" ? body.name : undefined;
+      const bopsWsId =
+        body.bops_ws_id === null || typeof body.bops_ws_id === "string" ? (body.bops_ws_id as string | null) : undefined;
+      if (name !== undefined && nameTaken(state, name, projectId)) {
+        throw new HttpError(400, "name taken", { code: "WORKSPACE_NAME_TAKEN" });
+      }
+      await store.update((file) => {
+        const row = file.workspaces[projectId];
+        if (!row) return;
+        if (name !== undefined) row.name = name;
+        if (bopsWsId !== undefined) row.bopsWsId = bopsWsId;
+      });
+      const fresh = await store.read();
+      const next = "error" in fresh ? ws : (findWorkspace(fresh, projectId) ?? ws);
+      sendJson(res, 200, { id: next.id, name: next.name, bopsWsId: next.bopsWsId });
+      return 200;
+    }
     if (rest === "/delete" && method === "POST") {
       requireAccount(actor);
       const state = await store.read();

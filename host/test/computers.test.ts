@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FakeDriver } from "../incus-fake.ts";
+import { openStore } from "../state.ts";
 import { withPlane } from "./helpers.ts";
 
 async function workspace(plane: Awaited<ReturnType<typeof withPlane>>) {
@@ -60,6 +61,26 @@ test("a full host does not create", async () => {
   assert.equal(body.code, "host_full");
   assert.equal(body.free_ram_mb, 1000);
   assert.equal(driver.created, 0);
+  await plane.close();
+});
+
+test("create rolls back when start fails", async () => {
+  const driver = new FakeDriver();
+  driver.startError = new Error("start failed");
+  const plane = await withPlane({ driver });
+  const workspaceId = await workspace(plane);
+  const res = await fetch(`${plane.base}/api/computers`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ workspace_id: workspaceId, name: "Sam", template_ref: "bops-base" }),
+  });
+  assert.equal(res.status, 503);
+  assert.deepEqual(await res.json(), { code: "incus_down", error: "incus down" });
+  assert.equal(driver.deleted.length, 1);
+  assert.equal(driver.created, 1);
+  const store = openStore(plane.statePath);
+  const file = await store.read();
+  if (!("error" in file)) assert.equal(Object.keys(file.computers).length, 0);
   await plane.close();
 });
 

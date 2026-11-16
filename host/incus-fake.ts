@@ -2,6 +2,7 @@ import type { ExecResult, IncusDriver } from "./incus.ts";
 
 export class FakeDriver implements IncusDriver {
   versionError: Error | null = null;
+  startError: Error | null = null;
   freeRamMb = 65536;
   freeDiskGb = 400;
   execs: { instance: string; command: string; timeoutSec: number }[] = [];
@@ -25,6 +26,7 @@ export class FakeDriver implements IncusDriver {
     return { instance: `inst-${input.name}` };
   }
   async start(instance: string) {
+    if (this.startError) throw this.startError;
     this.started.push(instance);
   }
   async stop(instance: string) {

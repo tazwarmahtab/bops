@@ -167,3 +167,21 @@ test("resize, webrtc, size, and ssh follow the contract", async () => {
   });
   await plane.close();
 });
+
+test("ssh POST on a running computer writes the key without resume", async () => {
+  const driver = new FakeDriver();
+  const { plane, id } = await boot(driver);
+  const writesBefore = driver.writes.length;
+  const on = await fetch(`${plane.base}/api/computers/${id}/ssh`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ public_key: "ssh-ed25519 BBBB" }),
+  });
+  assert.deepEqual(await on.json(), { enabled: true, pending: true });
+  assert.equal(driver.writes.length, writesBefore + 1);
+  const wrote = driver.writes[driver.writes.length - 1];
+  assert.equal(wrote.path, "/root/.ssh/authorized_keys");
+  assert.equal(wrote.mode, 0o600);
+  assert.match(wrote.contents.toString(), /ssh-ed25519 BBBB/);
+  await plane.close();
+});

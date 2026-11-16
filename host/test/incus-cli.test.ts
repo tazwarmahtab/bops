@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { execArgv, parseIncusFree } from "../incus-cli.ts";
+import { createInstanceArgv, execArgv, incusInstanceName, parseIncusFree } from "../incus-cli.ts";
 
 const hostRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -40,4 +40,17 @@ test("parseIncusFree ignores the old resources wrapper shape", () => {
 test("incus-cli screenshot command does not use ImageMagick", () => {
   const source = readFileSync(join(hostRoot, "incus-cli.ts"), "utf8");
   assert.doesNotMatch(source, /\bconvert\b/);
+});
+
+test("createInstanceArgv uses init, not launch", () => {
+  const argv = createInstanceArgv("incus", { image: "bops-base", name: "Oscar 2", cpu: 4, ramMb: 16384, diskGb: 80 });
+  assert.equal(argv[1], "init");
+  assert.notEqual(argv[1], "launch");
+  assert.match(argv[3], /^[A-Za-z][A-Za-z0-9-]{0,62}$/);
+});
+
+test("incusInstanceName sanitizes display names", () => {
+  assert.match(incusInstanceName("Oscar 2"), /^[A-Za-z][A-Za-z0-9-]{0,62}$/);
+  assert.equal(incusInstanceName("Oscar 2"), "Oscar-2");
+  assert.match(incusInstanceName("Sam 2"), /^[A-Za-z][A-Za-z0-9-]{0,62}$/);
 });

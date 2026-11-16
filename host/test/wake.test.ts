@@ -101,6 +101,33 @@ test("runner idle is 5 minutes and any other POST is 15", async () => {
   await plane.close();
 });
 
+test("resume after idle suspend stays running on the next tick", async () => {
+  const driver = new FakeDriver();
+  let now = 1_000_000;
+  const plane = await withPlane({ driver, now: () => now });
+  const { id } = await computerSecret(plane);
+  await fetch(`${plane.base}/api/bops/computer/active`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  await plane.tick(now + 15 * MIN);
+  const store = openStore(plane.statePath);
+  let file = await store.read();
+  if (!("error" in file)) {
+    assert.equal(file.computers[id].status, "suspended");
+    assert.equal(file.activity[id], undefined);
+  }
+  const stoppedAfterIdle = driver.stopped.length;
+  await fetch(`${plane.base}/api/computers/${id}/resume`, { method: "POST", headers: plane.auth });
+  now += 1000;
+  await plane.tick(now);
+  file = await store.read();
+  if (!("error" in file)) assert.equal(file.computers[id].status, "running");
+  assert.equal(driver.stopped.length, stoppedAfterIdle);
+  await plane.close();
+});
+
 test("an account POST idles at 15 minutes", async () => {
   const driver = new FakeDriver();
   let now = 1_000_000;

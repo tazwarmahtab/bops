@@ -38,6 +38,50 @@ test("creates a workspace, rejects a duplicate name, and lists desktops", async 
   await plane.close();
 });
 
+test("PATCH /api/projects/{id} renames the workspace", async () => {
+  const plane = await withPlane();
+  const made = await fetch(`${plane.base}/api/workspaces`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Alpha" }),
+  });
+  const { id } = (await made.json()) as { id: string };
+  const patched = await fetch(`${plane.base}/api/projects/${id}`, {
+    method: "PATCH",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Beta", bops_ws_id: "ws-1" }),
+  });
+  assert.equal(patched.status, 200);
+  assert.deepEqual(await patched.json(), { id, name: "Beta", bopsWsId: "ws-1" });
+  const dup = await fetch(`${plane.base}/api/workspaces`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Taken" }),
+  });
+  const other = (await dup.json()) as { id: string };
+  const conflict = await fetch(`${plane.base}/api/projects/${id}`, {
+    method: "PATCH",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Taken" }),
+  });
+  assert.equal(conflict.status, 400);
+  assert.deepEqual(await conflict.json(), { code: "WORKSPACE_NAME_TAKEN", error: "name taken" });
+  const missing = await fetch(`${plane.base}/api/projects/no-such-id`, {
+    method: "PATCH",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Nope" }),
+  });
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { error: "not found" });
+  const okOther = await fetch(`${plane.base}/api/projects/${other.id}`, {
+    method: "PATCH",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Gamma" }),
+  });
+  assert.equal(okOther.status, 200);
+  await plane.close();
+});
+
 test("project domains ignore Incus and still 404 unknown ids", async () => {
   const plane = await withPlane();
   const made = await fetch(`${plane.base}/api/workspaces`, {

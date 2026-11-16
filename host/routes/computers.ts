@@ -65,6 +65,7 @@ async function needsGuest(
     await store.update((file) => {
       file.computers[id].status = "running";
     });
+    await syncSshToGuest(store, driver, id, instance);
     throw new ResumeInProgress();
   }
   if (status === "starting" || status === "resuming" || status === "suspending") {
@@ -159,12 +160,13 @@ function sshView(bindHost: string, ssh: PlaneFile["ssh"][string] | undefined) {
   };
 }
 
-async function writeSshIfPending(store: Store, driver: IncusDriver, computerId: string, instance: string) {
+export async function syncSshToGuest(store: Store, driver: IncusDriver, computerId: string, instance: string) {
   const state = await store.read();
   if ("error" in state) return;
   const ssh = state.ssh[computerId];
-  if (!ssh?.enabled || !ssh.publicKey || ssh.hostPort !== null) return;
+  if (!ssh?.enabled || !ssh.publicKey) return;
   await driver.writeFile(instance, "/root/.ssh/authorized_keys", Buffer.from(`${ssh.publicKey}\n`), 0o600);
+  if (ssh.hostPort !== null) return;
   const port = await driver.sshPort(instance);
   await store.update((file) => {
     const row = file.ssh[computerId];
@@ -258,7 +260,13 @@ export async function computerRoutes(
     }
     const id = newComputerId();
     const { instance } = await driver.create({ name, image: "bops-base", cpu, ramMb, diskGb });
-    await driver.start(instance);
+    try {
+      await driver.start(instance);
+    } catch {
+      await driver.delete(instance);
+      sendJson(res, 503, { code: "incus_down", error: "incus down" });
+      return 503;
+    }
     const computer: Computer = {
       id,
       name,
@@ -372,6 +380,9 @@ export async function computerRoutes(
         await store.update((file) => {
           file.ssh[resolvedId] = { enabled: true, publicKey, hostPort: null };
         });
+        if (computer.status === "running") {
+          await syncSshToGuest(store, driver, resolvedId, computer.instance);
+        }
         sendJson(res, 200, { enabled: true, pending: true });
         return 200;
       }
@@ -552,11 +563,19 @@ export async function computerRoutes(
         return 200;
       }
       if (computer.status === "suspended") {
-        await driver.start(computer.instance);
+        try {
+          await driver.start(computer.instance);
+        } catch {
+          await store.update((file) => {
+            file.computers[computerId].status = "suspended";
+          });
+          sendJson(res, 503, { code: "incus_down", error: "incus down" });
+          return 503;
+        }
         await store.update((file) => {
           file.computers[computerId].status = "running";
         });
-        await writeSshIfPending(store, driver, computerId, computer.instance);
+        await syncSshToGuest(store, driver, computerId, computer.instance);
         sendJson(res, 200, { status: "running" });
         return 200;
       }

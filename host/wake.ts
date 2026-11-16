@@ -1,3 +1,4 @@
+import { syncSshToGuest } from "./routes/computers.ts";
 import type { IncusDriver } from "./incus.ts";
 import type { Store } from "./state.ts";
 
@@ -24,6 +25,7 @@ export async function tick(now: number) {
       await deps.store.update((draft) => {
         if (draft.computers[computer.id]) draft.computers[computer.id].status = "running";
       });
+      await syncSshToGuest(deps.store, deps.driver, computer.id, computer.instance);
     } catch {
       console.error(`wake ${computer.id} failed`);
     }
@@ -47,7 +49,10 @@ export async function tick(now: number) {
     if (now - beat.at < limit) continue;
     await deps.driver.stop(computer.instance);
     await deps.store.update((draft) => {
-      if (draft.computers[computer.id]) draft.computers[computer.id].status = "suspended";
+      if (draft.computers[computer.id]) {
+        draft.computers[computer.id].status = "suspended";
+        delete draft.activity[computer.id];
+      }
     });
   }
 }

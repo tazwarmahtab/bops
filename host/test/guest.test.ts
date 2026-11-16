@@ -102,6 +102,21 @@ test("a suspended screenshot does not call screenshot", async () => {
   await plane.close();
 });
 
+test("resume returns 503 when start fails", async () => {
+  const { plane, driver, id } = await make();
+  const store = openStore(plane.statePath);
+  await store.update((file) => {
+    file.computers[id].status = "suspended";
+  });
+  driver.startError = new Error("start failed");
+  const res = await fetch(`${plane.base}/api/computers/${id}/resume`, { method: "POST", headers: plane.auth });
+  assert.equal(res.status, 503);
+  assert.deepEqual(await res.json(), { code: "incus_down", error: "incus down" });
+  const file = await store.read();
+  if (!("error" in file)) assert.equal(file.computers[id].status, "suspended");
+  await plane.close();
+});
+
 test("stopped bash says not suspended", async () => {
   const { plane, driver, id } = await make();
   const store = openStore(plane.statePath);
