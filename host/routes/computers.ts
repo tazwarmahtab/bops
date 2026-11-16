@@ -332,6 +332,20 @@ export async function computerRoutes(
       return 401;
     }
 
+    if (parsed.sub === "fork" && method === "POST") {
+      const forkState = await store.read();
+      if ("error" in forkState) {
+        sendJson(res, 503, { code: "state_unreadable", error: "state unreadable" });
+        return 503;
+      }
+      if (!resolveComputer(forkState, computerId)) {
+        sendJson(res, 404, { error: "not found" });
+        return 404;
+      }
+      sendJson(res, 409, { code: "live_fork_unavailable", error: "live fork unavailable" });
+      return 409;
+    }
+
     const state = await requireReady(store, driver, res);
     if (!state) return 503;
     const resolved = resolveComputer(state, computerId);
@@ -340,11 +354,6 @@ export async function computerRoutes(
       return 404;
     }
     const { id: resolvedId, computer } = resolved;
-
-    if (parsed.sub === "fork" && method === "POST") {
-      sendJson(res, 409, { code: "live_fork_unavailable", error: "live fork unavailable" });
-      return 409;
-    }
 
     if (parsed.sub === "webrtc" && method === "POST") {
       sendJson(res, 200, { webrtc: false });

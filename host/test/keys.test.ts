@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash, randomBytes } from "node:crypto";
 import { test } from "node:test";
 import { FakeDriver } from "../incus-fake.ts";
 import { openStore } from "../state.ts";
@@ -66,6 +67,50 @@ test("fork is unavailable and clone checks free space", async () => {
   assert.equal(full.status, 409);
   assert.equal((await full.json()).code, "host_full");
   assert.equal(driver.cloned, 1);
+  await plane.close();
+});
+
+test("fork returns 409 even when Incus is down", async () => {
+  const { plane, driver, id } = await boot();
+  driver.versionError = new Error("incus down");
+  const fork = await fetch(`${plane.base}/api/computers/${id}/fork`, { method: "POST", headers: plane.auth });
+  assert.equal(fork.status, 409);
+  assert.equal((await fork.json()).code, "live_fork_unavailable");
+  const missing = await fetch(`${plane.base}/api/computers/no-such-id/fork`, { method: "POST", headers: plane.auth });
+  assert.equal(missing.status, 404);
+  await plane.close();
+});
+
+test("computer size stays account-only", async () => {
+  const { plane, id } = await boot();
+  const secret = `cmp_${randomBytes(16).toString("hex")}`;
+  const store = openStore(plane.statePath);
+  await store.update((file) => {
+    file.keys.k1 = {
+      keyId: "k1",
+      computerId: id,
+      hash: createHash("sha256").update(secret).digest("hex"),
+      prefix: "cmp_abcd",
+      name: "Computer key for Sam",
+      createdAt: new Date(0).toISOString(),
+      lastUsed: null,
+      expiresAt: null,
+    };
+  });
+  const denied = await fetch(`${plane.base}/api/bops/computer/size`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+    body: JSON.stringify({ size: "pro" }),
+  });
+  assert.equal(denied.status, 401);
+  assert.deepEqual(await denied.json(), { error: "unauthorized" });
+  const ok = await fetch(`${plane.base}/api/bops/computer/size`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ size: "pro" }),
+  });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { size: "pro", changed: false, restarted: false });
   await plane.close();
 });
 

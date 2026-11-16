@@ -244,7 +244,7 @@ async function handle(opts: RunningOpts, req: IncomingMessage, res: ServerRespon
       return;
     }
 
-    const sizeStatus = await sizeRoutes(req.method ?? "GET", url.pathname, req, res);
+    const sizeStatus = await sizeRoutes(actor, req.method ?? "GET", url.pathname, req, res);
     if (sizeStatus !== null) {
       status = sizeStatus;
       return;
