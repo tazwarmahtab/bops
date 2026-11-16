@@ -4,6 +4,7 @@ import type { IncusDriver } from "./incus.ts";
 import { HttpError, sendJson } from "./http.ts";
 import { closedRoutes } from "./routes/closed.ts";
 import { settingsRoutes } from "./routes/settings.ts";
+import { computerRoutes } from "./routes/computers.ts";
 import { workspaceRoutes } from "./routes/workspaces.ts";
 import { logLine } from "./log.ts";
 import { emptyFile, openStore, type Store } from "./state.ts";
@@ -116,6 +117,20 @@ async function handle(opts: RunningOpts, req: IncomingMessage, res: ServerRespon
     );
     if (workspaceStatus !== null) {
       status = workspaceStatus;
+      return;
+    }
+
+    const computerStatus = await computerRoutes(
+      opts.store,
+      opts.driver,
+      actor,
+      req.method ?? "GET",
+      url.pathname,
+      req,
+      res,
+    );
+    if (computerStatus !== null) {
+      status = computerStatus;
       return;
     }
 

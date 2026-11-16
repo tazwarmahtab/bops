@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Actor } from "../auth.ts";
 import { HttpError, readJson, sendJson } from "../http.ts";
 import type { IncusDriver } from "../incus.ts";
+import { purgeWorkspaceComputers } from "./computers.ts";
 import type { PlaneFile, Store } from "../state.ts";
 
 const MEMBERS_BODY = {
@@ -192,18 +193,15 @@ export async function workspaceRoutes(
         sendJson(res, 404, { error: "not found" });
         return 404;
       }
+      const instances = Object.values(state.computers)
+        .filter((c) => c.workspaceId === projectId)
+        .map((c) => c.instance);
+      for (const instance of instances) {
+        await driver.delete(instance);
+      }
       await store.update((file) => {
+        purgeWorkspaceComputers(file, projectId);
         delete file.workspaces[projectId];
-        const gone = new Set<string>();
-        for (const [id, computer] of Object.entries(file.computers)) {
-          if (computer.workspaceId === projectId) {
-            gone.add(id);
-            delete file.computers[id];
-          }
-        }
-        for (const [id, key] of Object.entries(file.keys)) {
-          if (gone.has(key.computerId)) delete file.keys[id];
-        }
       });
       sendJson(res, 200, { success: true });
       return 200;
