@@ -44,9 +44,15 @@ test("incus-cli screenshot command does not use ImageMagick", () => {
 
 test("createInstanceArgv uses init, not launch", () => {
   const argv = createInstanceArgv("incus", { image: "bops-base", name: "Oscar 2", cpu: 4, ramMb: 16384, diskGb: 80 });
+  assert.equal(argv[0], "incus");
   assert.equal(argv[1], "init");
   assert.notEqual(argv[1], "launch");
   assert.match(argv[3], /^[A-Za-z][A-Za-z0-9-]{0,62}$/);
+});
+
+test("cliDriver create passes createInstanceArgv without the binary prefix", () => {
+  const source = readFileSync(join(hostRoot, "incus-cli.ts"), "utf8");
+  assert.match(source, /run\(createInstanceArgv\(binary,\s*input\)\.slice\(1\)\)/);
 });
 
 test("incusInstanceName sanitizes display names", () => {

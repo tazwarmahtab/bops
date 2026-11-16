@@ -166,7 +166,7 @@ export function cliDriver(binary = "incus"): IncusDriver {
 
     async create(input) {
       const instance = incusInstanceName(input.name);
-      const result = await run(createInstanceArgv(binary, input));
+      const result = await run(createInstanceArgv(binary, input).slice(1));
       if (result.exitCode !== 0) throw new Error(result.stderr || "create failed");
       return { instance };
     },
