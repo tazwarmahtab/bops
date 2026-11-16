@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { connect, type Duplex } from "node:net";
 import { who } from "./auth.ts";
 import type { IncusDriver } from "./incus.ts";
 import { HttpError, sendJson } from "./http.ts";
@@ -26,6 +28,10 @@ export function start(opts: StartOpts) {
   const server = createServer((req, res) => {
     void handle(running, req, res);
   });
+  server.on("upgrade", (req, socket, head) => {
+    socket.on("error", () => socket.destroy());
+    void handleUpgrade(running, req, socket, head);
+  });
   return {
     server,
     listen: () =>
@@ -37,6 +43,107 @@ export function start(opts: StartOpts) {
       }),
     close: () => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
   };
+}
+
+function denyUpgrade(socket: Duplex, status: number, reason: string) {
+  socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  socket.destroy();
+}
+
+function acceptWebsocket(req: IncomingMessage, socket: Duplex) {
+  const key = req.headers["sec-websocket-key"];
+  if (!key || typeof key !== "string") {
+    denyUpgrade(socket, 400, "Bad Request");
+    return;
+  }
+  const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+  socket.write(
+    `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+  );
+  socket.end();
+}
+
+function portListening(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = connect({ host: "127.0.0.1", port });
+    probe.once("connect", () => {
+      probe.destroy();
+      resolve(true);
+    });
+    probe.once("error", () => resolve(false));
+    probe.setTimeout(250, () => {
+      probe.destroy();
+      resolve(false);
+    });
+  });
+}
+
+async function handleUpgrade(opts: RunningOpts, req: IncomingMessage, socket: Duplex, head: Buffer) {
+  const started = Date.now();
+  const url = new URL(req.url ?? "/", "http://127.0.0.1");
+  const template = "/desktops/{id}/ws/websockify";
+  let status = 404;
+  let computerId: string | null = null;
+  try {
+    const m = url.pathname.match(/^\/desktops\/([^/]+)\/ws\/websockify$/);
+    if (!m) {
+      denyUpgrade(socket, 404, "Not Found");
+      return;
+    }
+    computerId = m[1];
+    const token = url.searchParams.get("token") ?? "";
+    const screen = url.searchParams.get("screen");
+    const screenId = screen && screen.length > 0 ? screen : "default";
+    const state = await opts.store.read();
+    if ("error" in state) {
+      status = 503;
+      denyUpgrade(socket, 503, "Service Unavailable");
+      return;
+    }
+    const computer = state.computers[computerId];
+    if (!computer) {
+      denyUpgrade(socket, 404, "Not Found");
+      return;
+    }
+    if (!token || token !== computer.vncPassword) {
+      status = 401;
+      denyUpgrade(socket, 401, "Unauthorized");
+      return;
+    }
+    const port = await opts.driver.vncPort(computer.instance, screenId);
+    if (await portListening(port)) {
+      status = 101;
+      const remote = connect({ host: "127.0.0.1", port });
+      remote.once("connect", () => {
+        const lines = [`${req.method} ${req.url} HTTP/${req.httpVersion}`];
+        for (const [key, value] of Object.entries(req.headers)) {
+          if (value === undefined) continue;
+          lines.push(`${key}: ${Array.isArray(value) ? value.join(", ") : value}`);
+        }
+        lines.push("", "");
+        remote.write(lines.join("\r\n"));
+        if (head.length) remote.write(head);
+        remote.pipe(socket);
+        socket.pipe(remote);
+        remote.once("error", () => {
+          socket.destroy();
+          remote.destroy();
+        });
+        socket.once("error", () => {
+          socket.destroy();
+          remote.destroy();
+        });
+        remote.once("close", () => socket.destroy());
+        socket.once("close", () => remote.destroy());
+      });
+      remote.once("error", () => acceptWebsocket(req, socket));
+      return;
+    }
+    acceptWebsocket(req, socket);
+    status = 101;
+  } finally {
+    logLine(req.method ?? "GET", template, status, Date.now() - started, computerId);
+  }
 }
 
 async function handle(opts: RunningOpts, req: IncomingMessage, res: ServerResponse) {

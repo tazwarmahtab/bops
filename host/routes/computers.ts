@@ -250,7 +250,8 @@ export async function computerRoutes(
   }
 
   const guestActions = new Set(["bash", "click", "type", "key", "screenshot", "screens", "resume", "restart"]);
-  if (!guestActions.has(parsed.sub)) return null;
+  const screenRoute = parsed.sub === "screens" || (parsed.sub?.startsWith("screens/") ?? false);
+  if (!guestActions.has(parsed.sub ?? "") && !screenRoute) return null;
 
   const state = await requireReady(store, driver, res);
   if (!state) return 503;
@@ -316,6 +317,58 @@ export async function computerRoutes(
     if (parsed.sub === "screens" && method === "GET") {
       await needsGuest(store, computer, driver, "screenshot");
       sendJson(res, 200, { screens: computer.screens });
+      return 200;
+    }
+
+    if (parsed.sub === "screens" && method === "POST") {
+      await needsGuest(store, computer, driver, "action");
+      const stateAfter = await store.read();
+      if ("error" in stateAfter) throw new HttpError(503, "state unreadable", { code: "state_unreadable" });
+      const current = stateAfter.computers[computerId]!;
+      if (current.screens.length >= SCREENS.length) {
+        sendJson(res, 409, { error: "four displays" });
+        return 409;
+      }
+      const next = SCREENS.find((id) => !current.screens.includes(id));
+      if (!next) {
+        sendJson(res, 409, { error: "four displays" });
+        return 409;
+      }
+      await store.update((file) => {
+        file.computers[computerId].screens.push(next);
+      });
+      sendJson(res, 200, { id: next, default: next === "default" });
+      return 200;
+    }
+
+    const screenParts = parsed.sub?.match(/^screens\/([^/]+)$/) ?? null;
+    if (screenParts && method === "DELETE") {
+      const screenId = screenParts[1] as ScreenId;
+      await needsGuest(store, computer, driver, "action");
+      if (screenId === "default") {
+        sendJson(res, 409, { error: "cannot delete default" });
+        return 409;
+      }
+      const stateAfter = await store.read();
+      if ("error" in stateAfter) throw new HttpError(503, "state unreadable", { code: "state_unreadable" });
+      const current = stateAfter.computers[computerId]!;
+      if (!current.screens.includes(screenId)) {
+        sendJson(res, 404, { error: "not found" });
+        return 404;
+      }
+      await store.update((file) => {
+        file.computers[computerId].screens = file.computers[computerId].screens.filter((s) => s !== screenId);
+      });
+      sendJson(res, 200, { deleted: true });
+      return 200;
+    }
+
+    if (screenParts && screenParts[1] === "default" && method === "PATCH") {
+      const body = await readJson(req);
+      const width = typeof body.width === "number" ? body.width : 0;
+      const height = typeof body.height === "number" ? body.height : 0;
+      if (!width || !height) throw new HttpError(400, "bad body");
+      sendJson(res, 200, { id: "default", width, height, default: true, display: ":99" });
       return 200;
     }
   } catch (e) {
