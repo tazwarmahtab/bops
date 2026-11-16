@@ -15,6 +15,65 @@ function shellQuote(text: string): string {
   return `'${text.replace(/'/g, `'\\''`)}'`;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function freeBytes(total: unknown, used: unknown): number | null {
+  if (typeof total !== "number" || typeof used !== "number") return null;
+  return total - used;
+}
+
+function diskGbFromPools(pools: Record<string, unknown>): number {
+  const pool = isRecord(pools.default) ? pools.default : Object.values(pools).find(isRecord);
+  if (!pool) return 0;
+  const space = pool.space;
+  if (!isRecord(space)) return 0;
+  const free = freeBytes(space.total, space.used);
+  return free === null ? 0 : Math.floor(free / 1e9);
+}
+
+export function parseIncusFree(resources: unknown, storage?: unknown): { ramMb: number; diskGb: number } {
+  let ramMb = 0;
+  let diskGb = 0;
+  if (isRecord(resources)) {
+    const memory = resources.memory;
+    if (isRecord(memory)) {
+      const free = freeBytes(memory.total, memory.used);
+      if (free !== null) ramMb = Math.floor(free / (1024 * 1024));
+    }
+    const pools = isRecord(resources.storage) ? resources.storage.pools : undefined;
+    if (isRecord(pools)) diskGb = diskGbFromPools(pools);
+  }
+  if (diskGb === 0 && isRecord(storage)) {
+    const space = storage.space;
+    if (isRecord(space)) {
+      const free = freeBytes(space.total, space.used);
+      if (free !== null) diskGb = Math.floor(free / 1e9);
+    }
+  }
+  return { ramMb, diskGb };
+}
+
+function screenshotCmd(display: number, format: "jpeg" | "png", scale: number): { cmd: string; pull: string } {
+  const ext = format === "png" ? "png" : "jpg";
+  const capture = `/tmp/bops-shot.${ext}`;
+  const scalePct = Math.round(scale * 100);
+  if (scalePct === 100) {
+    return { cmd: `DISPLAY=:${display} scrot -o ${capture}`, pull: capture };
+  }
+  const pull = capture.replace(/(\.[^.]+)$/, "-thumb$1");
+  return { cmd: `DISPLAY=:${display} scrot -o ${capture} --thumb ${scalePct}`, pull };
+}
+
 export function cliDriver(binary = "incus"): IncusDriver {
   async function run(args: string[]): Promise<ExecResult> {
     return new Promise((resolve, reject) => {
@@ -62,34 +121,12 @@ export function cliDriver(binary = "incus"): IncusDriver {
     },
 
     async free() {
-      let ramMb = 0;
-      let diskGb = 0;
       const resources = await run(["info", "--resources", "--format", "json"]);
-      if (resources.exitCode === 0) {
-        try {
-          const parsed = JSON.parse(resources.stdout) as {
-            resources?: { memory?: { nodes?: { total?: number; used?: number }[] } };
-          };
-          const node = parsed.resources?.memory?.nodes?.[0];
-          if (node?.total != null && node.used != null) {
-            ramMb = Math.floor((node.total - node.used) / (1024 * 1024));
-          }
-        } catch {
-          // keep defaults
-        }
-      }
       const storage = await run(["storage", "info", "default", "--format", "json"]);
-      if (storage.exitCode === 0) {
-        try {
-          const parsed = JSON.parse(storage.stdout) as { disk?: { total?: number; used?: number } };
-          if (parsed.disk?.total != null && parsed.disk.used != null) {
-            diskGb = Math.floor((parsed.disk.total - parsed.disk.used) / 1e9);
-          }
-        } catch {
-          // keep defaults
-        }
-      }
-      return { ramMb: ramMb || 65536, diskGb: diskGb || 400 };
+      const resourcesJson = resources.exitCode === 0 ? parseJson(resources.stdout) : null;
+      const storageJson = storage.exitCode === 0 ? parseJson(storage.stdout) : null;
+      if (resourcesJson === null && storageJson === null) return { ramMb: 0, diskGb: 0 };
+      return parseIncusFree(resourcesJson, storageJson ?? undefined);
     },
 
     async create(input) {
@@ -172,16 +209,10 @@ export function cliDriver(binary = "incus"): IncusDriver {
 
     async screenshot(instance, screen, format, scale) {
       const display = displayNum(screen);
-      const ext = format === "png" ? "png" : "jpg";
-      const remote = `/tmp/bops-shot.${ext}`;
-      const scalePct = Math.round(scale * 100);
-      const cmd =
-        format === "png"
-          ? `DISPLAY=:${display} scrot -o ${remote} && convert ${remote} -resize ${scalePct}% ${remote}.tmp && mv ${remote}.tmp ${remote}`
-          : `DISPLAY=:${display} scrot -o /tmp/bops-shot.png && convert /tmp/bops-shot.png -resize ${scalePct}% -quality 85 ${remote} && rm -f /tmp/bops-shot.png`;
+      const { cmd, pull } = screenshotCmd(display, format, scale);
       const shot = await driver.exec(instance, cmd, 20);
       if (shot.exitCode !== 0) throw new Error(shot.stderr || "screenshot failed");
-      return pullFile(instance, remote);
+      return pullFile(instance, pull);
     },
 
     async input(instance, kind, body, screen) {
