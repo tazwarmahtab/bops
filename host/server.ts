@@ -7,6 +7,7 @@ import { HttpError, sendJson } from "./http.ts";
 import { closedRoutes } from "./routes/closed.ts";
 import { settingsRoutes } from "./routes/settings.ts";
 import { computerRoutes } from "./routes/computers.ts";
+import { sizeRoutes } from "./routes/size.ts";
 import { workspaceRoutes } from "./routes/workspaces.ts";
 import { logLine } from "./log.ts";
 import { emptyFile, openStore, type Store } from "./state.ts";
@@ -235,9 +236,17 @@ async function handle(opts: RunningOpts, req: IncomingMessage, res: ServerRespon
       url.pathname,
       req,
       res,
+      opts.host,
+      opts.now,
     );
     if (computerStatus !== null) {
       status = computerStatus;
+      return;
+    }
+
+    const sizeStatus = await sizeRoutes(req.method ?? "GET", url.pathname, req, res);
+    if (sizeStatus !== null) {
+      status = sizeStatus;
       return;
     }
 

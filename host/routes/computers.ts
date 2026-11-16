@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Actor } from "../auth.ts";
+import { sha256, type Actor } from "../auth.ts";
 import { HttpError, readJson, sendJson } from "../http.ts";
 import type { IncusDriver } from "../incus.ts";
-import type { Computer, PlaneFile, ScreenId, Store } from "../state.ts";
+import type { Computer, PlaneFile, ScreenId, StoredKey, Store } from "../state.ts";
 
 const SCREENS: ScreenId[] = ["default", "screen-100", "screen-101", "screen-102"];
 
@@ -93,6 +93,85 @@ function nameTaken(file: PlaneFile, name: string) {
   return Object.values(file.computers).some((c) => c.name === name);
 }
 
+function uniqueName(file: PlaneFile, base: string) {
+  if (!nameTaken(file, base)) return base;
+  for (let n = 2; ; n++) {
+    const candidate = `${base} ${n}`;
+    if (!nameTaken(file, candidate)) return candidate;
+  }
+}
+
+function resolveComputer(file: PlaneFile, key: string) {
+  const direct = file.computers[key];
+  if (direct) return { id: key, computer: direct };
+  const found = Object.entries(file.computers).find(([, c]) => c.instance === key);
+  return found ? { id: found[0], computer: found[1] } : null;
+}
+
+function computerStoredKey(file: PlaneFile, computerId: string): StoredKey | null {
+  return Object.values(file.keys).find((k) => k.computerId === computerId) ?? null;
+}
+
+function keyPrefix(secret: string) {
+  return secret.replace(/[^A-Za-z0-9_]/g, "a").slice(0, 8);
+}
+
+async function writeOrgoSecrets(driver: IncusDriver, instance: string, secret: string | null) {
+  const contents = secret ? Buffer.from(`export ORGO_API_KEY='${secret}'\n`) : Buffer.from("");
+  await driver.writeFile(instance, "/root/.orgo-secrets.env", contents, 0o600);
+}
+
+function dropComputerKey(file: PlaneFile, computerId: string) {
+  for (const [keyId, key] of Object.entries(file.keys)) {
+    if (key.computerId === computerId) delete file.keys[keyId];
+  }
+}
+
+function sshView(bindHost: string, ssh: PlaneFile["ssh"][string] | undefined) {
+  if (!ssh?.enabled) {
+    return {
+      enabled: false as const,
+      authorized_key_set: false,
+      ipv4_host: null,
+      ipv4_port: null,
+      ssh_user: null,
+      ssh_command: null,
+    };
+  }
+  if (ssh.hostPort === null) {
+    return {
+      enabled: true as const,
+      authorized_key_set: false,
+      ipv4_host: null,
+      ipv4_port: null,
+      ssh_user: null,
+      ssh_command: null,
+    };
+  }
+  const port = ssh.hostPort > 0 ? ssh.hostPort : null;
+  return {
+    enabled: true as const,
+    authorized_key_set: true,
+    ipv4_host: bindHost,
+    ipv4_port: port,
+    ssh_user: "root" as const,
+    ssh_command: port !== null ? `ssh root@${bindHost} -p ${port}` : null,
+  };
+}
+
+async function writeSshIfPending(store: Store, driver: IncusDriver, computerId: string, instance: string) {
+  const state = await store.read();
+  if ("error" in state) return;
+  const ssh = state.ssh[computerId];
+  if (!ssh?.enabled || !ssh.publicKey || ssh.hostPort !== null) return;
+  await driver.writeFile(instance, "/root/.ssh/authorized_keys", Buffer.from(`${ssh.publicKey}\n`), 0o600);
+  const port = await driver.sshPort(instance);
+  await store.update((file) => {
+    const row = file.ssh[computerId];
+    if (row) row.hostPort = port ?? 0;
+  });
+}
+
 async function requireReady(store: Store, driver: IncusDriver, res: ServerResponse): Promise<PlaneFile | null> {
   const state = await store.read();
   if ("error" in state) {
@@ -141,6 +220,8 @@ export async function computerRoutes(
   path: string,
   req: IncomingMessage,
   res: ServerResponse,
+  bindHost: string,
+  now: () => number,
 ): Promise<number | null> {
   if (path === "/api/computers") {
     if (method !== "POST") return null;
@@ -244,6 +325,200 @@ export async function computerRoutes(
     return null;
   }
 
+  const extraSubs = new Set(["orgo-key", "fork", "clone", "resize", "webrtc", "ssh"]);
+  if (extraSubs.has(parsed.sub ?? "")) {
+    if (actor.kind === "computer") {
+      sendJson(res, 401, { error: "unauthorized" });
+      return 401;
+    }
+
+    const state = await requireReady(store, driver, res);
+    if (!state) return 503;
+    const resolved = resolveComputer(state, computerId);
+    if (!resolved) {
+      sendJson(res, 404, { error: "not found" });
+      return 404;
+    }
+    const { id: resolvedId, computer } = resolved;
+
+    if (parsed.sub === "fork" && method === "POST") {
+      sendJson(res, 409, { code: "live_fork_unavailable", error: "live fork unavailable" });
+      return 409;
+    }
+
+    if (parsed.sub === "webrtc" && method === "POST") {
+      sendJson(res, 200, { webrtc: false });
+      return 200;
+    }
+
+    if (parsed.sub === "ssh") {
+      if (method === "GET") {
+        sendJson(res, 200, sshView(bindHost, state.ssh[resolvedId]));
+        return 200;
+      }
+      if (method === "POST") {
+        const body = await readJson(req);
+        const publicKey = typeof body.public_key === "string" ? body.public_key : "";
+        if (!publicKey) throw new HttpError(400, "bad body");
+        await store.update((file) => {
+          file.ssh[resolvedId] = { enabled: true, publicKey, hostPort: null };
+        });
+        sendJson(res, 200, { enabled: true, pending: true });
+        return 200;
+      }
+      return null;
+    }
+
+    if (parsed.sub === "resize") {
+      if (method === "GET") {
+        const free = await driver.free();
+        sendJson(res, 200, {
+          current_disk_gb: computer.diskGb,
+          max_disk_gb: computer.diskGb + free.diskGb,
+        });
+        return 200;
+      }
+      if (method === "PATCH") {
+        const body = await readJson(req);
+        if (typeof body.disk_size_gb !== "number") {
+          const size = typeof body.size === "string" ? body.size : "";
+          sendJson(res, 200, { size, changed: false, restarted: false });
+          return 200;
+        }
+        const free = await driver.free();
+        const maxDisk = computer.diskGb + free.diskGb;
+        if (body.disk_size_gb > maxDisk) {
+          sendJson(res, 409, {
+            code: "disk_full",
+            current_disk_gb: computer.diskGb,
+            max_disk_gb: maxDisk,
+          });
+          return 409;
+        }
+        await driver.resizeDisk(computer.instance, body.disk_size_gb);
+        await store.update((file) => {
+          file.computers[resolvedId].diskGb = body.disk_size_gb;
+        });
+        sendJson(res, 200, { disk_gb: body.disk_size_gb });
+        return 200;
+      }
+      return null;
+    }
+
+    if (parsed.sub === "clone" && method === "POST") {
+      const body = await readJson(req);
+      const workspaceId = typeof body.workspace_id === "string" ? body.workspace_id : "";
+      if (!workspaceId || !state.workspaces[workspaceId]) {
+        sendJson(res, 404, { error: "not found" });
+        return 404;
+      }
+      const free = await driver.free();
+      if (free.ramMb < computer.ramMb || free.diskGb < computer.diskGb) {
+        sendJson(res, 409, {
+          code: "host_full",
+          error: "host full",
+          free_ram_mb: free.ramMb,
+          free_disk_gb: free.diskGb,
+        });
+        return 409;
+      }
+      const name =
+        typeof body.name === "string" && body.name.length > 0 ? body.name : uniqueName(state, computer.name);
+      if (nameTaken(state, name)) throw new HttpError(409, "name taken");
+      const { instance } = await driver.clone(computer.instance, name);
+      await driver.start(instance);
+      const id = newComputerId();
+      const cloneComputer: Computer = {
+        id,
+        name,
+        workspaceId,
+        instance,
+        status: "running",
+        vncPassword: newVncPassword(),
+        cpu: computer.cpu,
+        ramMb: computer.ramMb,
+        diskGb: computer.diskGb,
+        screens: [...computer.screens],
+      };
+      await store.update((file) => {
+        file.computers[id] = cloneComputer;
+      });
+      sendJson(res, 200, { id, name, status: "running" as const });
+      return 200;
+    }
+
+    if (parsed.sub === "orgo-key") {
+      try {
+        if (method === "GET") {
+          const key = computerStoredKey(state, resolvedId);
+          if (!key) {
+            sendJson(res, 404, { code: "key_not_found", error: "key not found" });
+            return 404;
+          }
+          sendJson(res, 200, {
+            keyId: key.keyId,
+            prefix: key.prefix,
+            name: key.name,
+            createdAt: key.createdAt,
+            lastUsed: key.lastUsed,
+            expiresAt: key.expiresAt,
+          });
+          return 200;
+        }
+
+        if (method === "DELETE") {
+          const key = computerStoredKey(state, resolvedId);
+          if (!key) {
+            sendJson(res, 404, { code: "key_not_found", error: "key not found" });
+            return 404;
+          }
+          if (computer.status === "running") {
+            await writeOrgoSecrets(driver, computer.instance, null);
+          }
+          await store.update((file) => {
+            delete file.keys[key.keyId];
+          });
+          sendJson(res, 200, { deleted: true });
+          return 200;
+        }
+
+        if (method === "PUT") {
+          await needsGuest(store, computer, driver, "action");
+          const secret = randomBytes(32).toString("base64url");
+          const keyId = randomBytes(8).toString("hex");
+          const record: StoredKey = {
+            keyId,
+            computerId: resolvedId,
+            hash: sha256(secret),
+            prefix: keyPrefix(secret),
+            name: `Computer key for ${computer.name}`,
+            createdAt: new Date(now()).toISOString(),
+            lastUsed: null,
+            expiresAt: null,
+          };
+          await store.update((file) => {
+            dropComputerKey(file, resolvedId);
+            file.keys[keyId] = record;
+          });
+          const after = await store.read();
+          if ("error" in after) throw new HttpError(503, "state unreadable", { code: "state_unreadable" });
+          const current = after.computers[resolvedId]!;
+          if (current.status === "running") {
+            await writeOrgoSecrets(driver, current.instance, secret);
+          }
+          sendJson(res, 200, { keyId });
+          return 200;
+        }
+      } catch (e) {
+        if (e instanceof ResumeInProgress) return resumeInProgress(res);
+        throw e;
+      }
+      return null;
+    }
+
+    return null;
+  }
+
   if (actor.kind === "computer") {
     sendJson(res, 401, { error: "unauthorized" });
     return 401;
@@ -272,6 +547,7 @@ export async function computerRoutes(
         await store.update((file) => {
           file.computers[computerId].status = "running";
         });
+        await writeSshIfPending(store, driver, computerId, computer.instance);
         sendJson(res, 200, { status: "running" });
         return 200;
       }
