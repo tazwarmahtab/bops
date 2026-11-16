@@ -224,6 +224,26 @@ Bot computers launch from an Orgo template built from this repo. By default they
 
 Bops keeps its computers in one Orgo workspace: the signed-in user's workspace named "bops", or `BOPS_ORGO_WORKSPACE` when self-hosting on `ORGO_API_KEY`. It never creates or deletes computers outside it.
 
+### Your own computer plane
+
+The plane in `host/` runs on a **Linux host** with **Incus** and Node 24. The Mac app stays the client: point `BOPS_ORGO_ORIGIN` at the plane URL, or at `http://127.0.0.1:8788` only when the app runs on that same box. **Keys and Your Apps are closed on this plane** (Orgo Cloud-only surfaces stay unavailable). Set `BOPS_HEADSCALE_URL` when you already run **Headscale** for egress rendezvous; the plane records it and does not start Headscale.
+
+A **non-loopback bind is unsupported** until the operator terminates TLS in front of the plane; the plane does not mint a certificate. Set `BOPS_UPLOAD_ORIGIN` to an `https` origin when uploads must work.
+
+Run the plane under **systemd** on the host:
+
+```
+[Service]
+WorkingDirectory=/opt/bops
+ExecStart=/usr/bin/node host/main.ts
+Environment=ORGO_API_KEY=replace-me
+Environment=BOPS_WEBRTC=0
+```
+
+Copy the repo to `/opt/bops`, install Node 24 on the host, and set `ORGO_API_KEY` to your local key. No new required key besides the local `ORGO_API_KEY`. See `.env.example` for `BOPS_UPLOAD_ORIGIN`, `BOPS_WEBRTC=0`, and `BOPS_HEADSCALE_URL`.
+
+**Manual check:** create a computer, open its screen in the app, run a one-line bash command, and confirm the runner log says `auth: key`.
+
 ### Texts and calls
 
 Optional, for self-hosting:
