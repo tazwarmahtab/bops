@@ -11,6 +11,7 @@ import { sizeRoutes } from "./routes/size.ts";
 import { workspaceRoutes } from "./routes/workspaces.ts";
 import { logLine } from "./log.ts";
 import { egressRoutes } from "./routes/egress.ts";
+import { filesRoutes, handleUploadPut } from "./routes/files.ts";
 import { routineRoutes } from "./routes/routines.ts";
 import { emptyFile, openStore, type Store } from "./state.ts";
 import { bindWake, tick } from "./wake.ts";
@@ -178,6 +179,14 @@ async function handle(opts: RunningOpts, req: IncomingMessage, res: ServerRespon
       }
       return;
     }
+
+    const uploadPut = url.pathname.match(/^\/api\/files\/uploads\/([^/]+)$/);
+    if (req.method === "PUT" && uploadPut) {
+      template = "/api/files/uploads/{token}";
+      status = await handleUploadPut(opts.store, uploadPut[1]!, req, res);
+      return;
+    }
+
     const header = req.headers.authorization ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
     if (!token) {
@@ -282,6 +291,20 @@ async function handle(opts: RunningOpts, req: IncomingMessage, res: ServerRespon
     );
     if (egressStatus !== null) {
       status = egressStatus;
+      return;
+    }
+
+    const filesStatus = await filesRoutes(
+      opts.store,
+      opts.driver,
+      actor,
+      req.method ?? "GET",
+      url.pathname,
+      req,
+      res,
+    );
+    if (filesStatus !== null) {
+      status = filesStatus;
       return;
     }
 
