@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { IncusDriver } from "./incus.ts";
 import { HttpError, sendJson } from "./http.ts";
 import { logLine } from "./log.ts";
+import { openStore } from "./state.ts";
 
 export type StartOpts = {
   driver: IncusDriver;
@@ -36,6 +37,12 @@ async function handle(opts: StartOpts, req: IncomingMessage, res: ServerResponse
   let template = url.pathname;
   try {
     if (req.method === "GET" && url.pathname === "/health") {
+      const state = await openStore(opts.statePath).read();
+      if ("error" in state) {
+        status = 503;
+        sendJson(res, 503, { ok: false, code: "state_unreadable" });
+        return;
+      }
       try {
         await opts.driver.version();
         status = 200;
