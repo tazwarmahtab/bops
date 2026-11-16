@@ -4,6 +4,7 @@ import type { IncusDriver } from "./incus.ts";
 import { HttpError, sendJson } from "./http.ts";
 import { closedRoutes } from "./routes/closed.ts";
 import { settingsRoutes } from "./routes/settings.ts";
+import { workspaceRoutes } from "./routes/workspaces.ts";
 import { logLine } from "./log.ts";
 import { emptyFile, openStore, type Store } from "./state.ts";
 
@@ -98,7 +99,27 @@ async function handle(opts: RunningOpts, req: IncomingMessage, res: ServerRespon
     const state = await opts.store.read();
     const actorFile = "error" in state ? emptyFile() : state;
     const actor = who(token, opts.accountKey, actorFile);
-    if (!actor || actor.kind === "computer") {
+    if (!actor) {
+      status = 401;
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+
+    const workspaceStatus = await workspaceRoutes(
+      opts.store,
+      opts.driver,
+      actor,
+      req.method ?? "GET",
+      url.pathname,
+      req,
+      res,
+    );
+    if (workspaceStatus !== null) {
+      status = workspaceStatus;
+      return;
+    }
+
+    if (actor.kind === "computer") {
       status = 401;
       sendJson(res, 401, { error: "unauthorized" });
       return;

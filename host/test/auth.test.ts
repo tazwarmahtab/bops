@@ -43,11 +43,12 @@ test("a computer bearer gets computer scope", async () => {
   const res = await fetch(`${plane.base}/api/user/profile`, { headers: { authorization: `Bearer ${secret}` } });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { id: "local", api_key: { scope: "computer", computer_id: "c1" } });
-  const denied = await fetch(`${plane.base}/api/workspaces/w1/delete-preview`, {
+  const denied = await fetch(`${plane.base}/api/projects/w1/delete`, {
     method: "POST",
     headers: { authorization: `Bearer ${secret}` },
   });
-  assert.equal(denied.status, 401);
+  assert.equal(denied.status, 403);
+  assert.deepEqual(await denied.json(), { code: "owner_only", error: "owner only" });
   await plane.close();
 });
 
