@@ -10,6 +10,7 @@ import { computerRoutes } from "./routes/computers.ts";
 import { sizeRoutes } from "./routes/size.ts";
 import { workspaceRoutes } from "./routes/workspaces.ts";
 import { logLine } from "./log.ts";
+import { egressRoutes } from "./routes/egress.ts";
 import { routineRoutes } from "./routes/routines.ts";
 import { emptyFile, openStore, type Store } from "./state.ts";
 import { bindWake, tick } from "./wake.ts";
@@ -268,6 +269,19 @@ async function handle(opts: RunningOpts, req: IncomingMessage, res: ServerRespon
     );
     if (routineStatus !== null) {
       status = routineStatus;
+      return;
+    }
+
+    const egressStatus = await egressRoutes(
+      opts.store,
+      actor,
+      req.method ?? "GET",
+      url.pathname,
+      req,
+      res,
+    );
+    if (egressStatus !== null) {
+      status = egressStatus;
       return;
     }
 
