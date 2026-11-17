@@ -28,7 +28,7 @@ async function computerSecret(plane: Awaited<ReturnType<typeof withPlane>>) {
 
 test("a due task routine starts a suspended computer", async () => {
   const driver = new FakeDriver();
-  let now = 1_000_000;
+  const now = 1_000_000;
   const plane = await withPlane({ driver, now: () => now });
   const ws = await fetch(`${plane.base}/api/workspaces`, {
     method: "POST",
@@ -62,7 +62,7 @@ test("a due task routine starts a suspended computer", async () => {
 
 test("no activity POST does not idle-suspend", async () => {
   const driver = new FakeDriver();
-  let now = 1_000_000;
+  const now = 1_000_000;
   const plane = await withPlane({ driver, now: () => now });
   const ws = await fetch(`${plane.base}/api/workspaces`, {
     method: "POST",
@@ -86,7 +86,7 @@ test("no activity POST does not idle-suspend", async () => {
 
 test("runner idle is 5 minutes and any other POST is 15", async () => {
   const driver = new FakeDriver();
-  let now = 1_000_000;
+  const now = 1_000_000;
   const plane = await withPlane({ driver, now: () => now });
   const { secret } = await computerSecret(plane);
   await fetch(`${plane.base}/api/bops/computer/active`, {
@@ -130,7 +130,7 @@ test("resume after idle suspend stays running on the next tick", async () => {
 
 test("an account POST idles at 15 minutes", async () => {
   const driver = new FakeDriver();
-  let now = 1_000_000;
+  const now = 1_000_000;
   const plane = await withPlane({ driver, now: () => now });
   const { id } = await computerSecret(plane);
   await fetch(`${plane.base}/api/bops/computer/active`, {
@@ -149,7 +149,7 @@ test("an account POST idles at 15 minutes", async () => {
 
 test("a routine due within 5 minutes blocks runner idle", async () => {
   const driver = new FakeDriver();
-  let now = 1_000_000;
+  const now = 1_000_000;
   const plane = await withPlane({ driver, now: () => now });
   const { id, workspaceId, secret } = await computerSecret(plane);
   await fetch(`${plane.base}/api/projects/${workspaceId}/routines`, {
@@ -169,9 +169,73 @@ test("a routine due within 5 minutes blocks runner idle", async () => {
   await plane.close();
 });
 
+// Value: protects=tick starts only a due local task on a startable computer, and a thrown start leaves it suspended; fails_when=onMac, a non-task, a stopped or error computer, or a failed start marks it running; why_new=wake tests cover a due task and idle timing only; seam=none; no_claim=does not cover ssh sync during wake
+test("wake skips onMac, non-task, and stopped computers, and a failed start stays suspended", async () => {
+  const driver = new FakeDriver();
+  const now = 1_000_000;
+  const plane = await withPlane({ driver, now: () => now });
+  const ws = await fetch(`${plane.base}/api/workspaces`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Bops" }),
+  });
+  const workspaceId = (await ws.json()).id as string;
+  const made = await fetch(`${plane.base}/api/computers`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ workspace_id: workspaceId, name: "Sam", template_ref: "bops-base" }),
+  });
+  const id = (await made.json()).id as string;
+  const store = openStore(plane.statePath);
+  await store.update((file) => {
+    file.computers[id].status = "suspended";
+  });
+  const started = driver.started.length;
+
+  async function put(row: { id: string; nextRunAt: number; onMac: boolean; run: string }) {
+    const res = await fetch(`${plane.base}/api/projects/${workspaceId}/routines`, {
+      method: "PUT",
+      headers: { ...plane.auth, "content-type": "application/json" },
+      body: JSON.stringify([row]),
+    });
+    assert.equal(res.status, 200);
+  }
+
+  await put({ id: "r-mac", nextRunAt: now, onMac: true, run: "task" });
+  await plane.tick(now);
+  await put({ id: "r-note", nextRunAt: now, onMac: false, run: "note" });
+  await plane.tick(now);
+  await store.update((file) => {
+    file.computers[id].status = "stopped";
+  });
+  await put({ id: "r-task", nextRunAt: now, onMac: false, run: "task" });
+  await plane.tick(now);
+  await store.update((file) => {
+    file.computers[id].status = "error";
+  });
+  await plane.tick(now);
+  assert.equal(driver.started.length, started);
+
+  await store.update((file) => {
+    file.computers[id].status = "suspended";
+  });
+  driver.startError = new Error("start failed");
+  await plane.tick(now);
+  driver.startError = null;
+  let file = await store.read();
+  if (!("error" in file)) assert.equal(file.computers[id].status, "suspended");
+  assert.equal(driver.started.length, started);
+
+  await plane.tick(now);
+  file = await store.read();
+  if (!("error" in file)) assert.equal(file.computers[id].status, "running");
+  assert.equal(driver.started.length, started + 1);
+  await plane.close();
+});
+
 test("an empty routine list does not start, and the bops map is not a clock", async () => {
   const driver = new FakeDriver();
-  let now = 1_000_000;
+  const now = 1_000_000;
   const plane = await withPlane({ driver, now: () => now });
   const { id, workspaceId } = await computerSecret(plane);
   const store = openStore(plane.statePath);

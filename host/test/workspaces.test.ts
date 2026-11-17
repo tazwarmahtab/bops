@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { FakeDriver } from "../incus-fake.ts";
 import { withPlane } from "./helpers.ts";
 
 test("creates a workspace, rejects a duplicate name, and lists desktops", async () => {
@@ -82,6 +83,54 @@ test("PATCH /api/projects/{id} renames the workspace", async () => {
   await plane.close();
 });
 
+// Value: protects=project delete removes that workspace's Incus instance and the workspace row; fails_when=the computer or workspace remains, another workspace's computer is deleted, or an unknown id returns 200; why_new=the only delete check is a computer-key 403; seam=none; no_claim=does not cover driver.delete throwing
+test("POST /api/projects/{id}/delete removes computers and the workspace", async () => {
+  const driver = new FakeDriver();
+  const plane = await withPlane({ driver });
+  const made = await fetch(`${plane.base}/api/workspaces`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Bops" }),
+  });
+  const keep = await fetch(`${plane.base}/api/workspaces`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Other" }),
+  });
+  const workspaceId = (await made.json()).id as string;
+  const otherId = (await keep.json()).id as string;
+  const sam = await fetch(`${plane.base}/api/computers`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ workspace_id: workspaceId, name: "Sam", template_ref: "bops-base" }),
+  });
+  const ada = await fetch(`${plane.base}/api/computers`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ workspace_id: otherId, name: "Ada", template_ref: "bops-base" }),
+  });
+  const samId = (await sam.json()).id as string;
+  const adaId = (await ada.json()).id as string;
+  const missing = await fetch(`${plane.base}/api/projects/no-such-id/delete`, { method: "POST", headers: plane.auth });
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { error: "not found" });
+  const deleted = await fetch(`${plane.base}/api/projects/${workspaceId}/delete`, { method: "POST", headers: plane.auth });
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(await deleted.json(), { success: true });
+  assert.deepEqual(driver.deleted, ["inst-Sam"]);
+  const goneWs = await fetch(`${plane.base}/api/workspaces/${workspaceId}`, { headers: plane.auth });
+  assert.equal(goneWs.status, 404);
+  const goneComputer = await fetch(`${plane.base}/api/computers/${samId}`, { headers: plane.auth });
+  assert.equal(goneComputer.status, 404);
+  const still = await fetch(`${plane.base}/api/computers/${adaId}`, { headers: plane.auth });
+  assert.equal(still.status, 200);
+  const listed = await fetch(`${plane.base}/api/workspaces`, { headers: plane.auth });
+  const body = (await listed.json()) as { workspaces: { id: string }[] };
+  assert.equal(body.workspaces.some((ws) => ws.id === workspaceId), false);
+  assert.equal(body.workspaces.some((ws) => ws.id === otherId), true);
+  await plane.close();
+});
+
 test("project domains ignore Incus and still 404 unknown ids", async () => {
   const plane = await withPlane();
   const made = await fetch(`${plane.base}/api/workspaces`, {
@@ -91,7 +140,7 @@ test("project domains ignore Incus and still 404 unknown ids", async () => {
   });
   assert.equal(made.status, 200);
   const { id } = (await made.json()) as { id: string };
-  plane.driver.versionError = new Error("incus down");
+  (plane.driver as FakeDriver).versionError = new Error("incus down");
   const domains = await fetch(`${plane.base}/api/projects/${id}/domains`, { headers: plane.auth });
   assert.equal(domains.status, 200);
   assert.deepEqual(await domains.json(), { registrar: false, enabled: false, domains: [] });

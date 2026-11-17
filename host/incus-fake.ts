@@ -14,6 +14,7 @@ export class FakeDriver implements IncusDriver {
   deleted: string[] = [];
   started: string[] = [];
   stopped: string[] = [];
+  resized: { instance: string; diskGb: number }[] = [];
   async version() {
     if (this.versionError) throw this.versionError;
     return "fake";
@@ -43,7 +44,9 @@ export class FakeDriver implements IncusDriver {
     this.cloned += 1;
     return { instance: `${instance}-clone-${name}` };
   }
-  async resizeDisk() {}
+  async resizeDisk(instance: string, diskGb: number) {
+    this.resized.push({ instance, diskGb });
+  }
   async exec(instance: string, command: string, timeoutSec: number): Promise<ExecResult> {
     this.execs.push({ instance, command, timeoutSec });
     if (timeoutSec <= 1) return { exitCode: 124, stdout: "", stderr: "killed" };

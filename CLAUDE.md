@@ -19,3 +19,11 @@ Key routing rules:
 - Resume context → invoke /context-restore
 - Author a backlog-ready spec/issue → invoke /spec
 
+## Testing
+
+Plane tests: `node --test host/test/*.test.ts` (Node v22 on this machine; the suite uses `node:test`, `node:assert/strict`, `withPlane`, and `FakeDriver`).
+
+Cloud core and edge stay on CI (`.github/workflows/ci.yml`). They need Postgres and Node 24.
+
+<!-- gstack-shortcut(dec-a4ee77be-0f9b-4feb-9f33-8b0ea44dfccf): 7/10, upgrade when Node 24 and Postgres are available for the Cloud suites -->
+

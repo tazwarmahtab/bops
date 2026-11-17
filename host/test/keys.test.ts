@@ -168,6 +168,25 @@ test("resize, webrtc, size, and ssh follow the contract", async () => {
   await plane.close();
 });
 
+// Value: protects=a disk_size_gb within free space is stored and passed to resizeDisk; fails_when=PATCH returns 200 but GET still shows the old disk or the driver is not called; why_new=only the oversize disk_full 409 was tested; seam=none; no_claim=does not cover shrinking below the current disk
+test("a disk resize within free space persists", async () => {
+  const driver = new FakeDriver();
+  const { plane, id } = await boot(driver);
+  const patched = await fetch(`${plane.base}/api/computers/${id}/resize`, {
+    method: "PATCH",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ disk_size_gb: 120 }),
+  });
+  assert.equal(patched.status, 200);
+  assert.deepEqual(await patched.json(), { disk_gb: 120 });
+  assert.deepEqual(driver.resized, [{ instance: "inst-Sam", diskGb: 120 }]);
+  const resize = await fetch(`${plane.base}/api/computers/${id}/resize`, { headers: plane.auth });
+  const disk = await resize.json();
+  assert.equal(disk.current_disk_gb, 120);
+  assert.equal(disk.max_disk_gb, 120 + driver.freeDiskGb);
+  await plane.close();
+});
+
 test("ssh POST on a running computer writes the key without resume", async () => {
   const driver = new FakeDriver();
   const { plane, id } = await boot(driver);

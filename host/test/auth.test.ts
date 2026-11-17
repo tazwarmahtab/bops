@@ -12,6 +12,25 @@ test("the account bearer gets the local profile", async () => {
   await plane.close();
 });
 
+// Value: protects=a bearer that is neither the account key nor a computer key is rejected; fails_when=any non-empty bearer is treated as the account; why_new=only a missing Authorization header was tested; seam=none; no_claim=does not cover computer-key expiry or lastUsed
+test("an unknown bearer is 401 on profile and workspace create", async () => {
+  const plane = await withPlane();
+  const headers = { authorization: "Bearer not-the-account-key", "content-type": "application/json" };
+  const profile = await fetch(`${plane.base}/api/user/profile`, { headers });
+  assert.equal(profile.status, 401);
+  assert.deepEqual(await profile.json(), { error: "unauthorized" });
+  const created = await fetch(`${plane.base}/api/workspaces`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ name: "Should not exist" }),
+  });
+  assert.equal(created.status, 401);
+  assert.deepEqual(await created.json(), { error: "unauthorized" });
+  const listed = await fetch(`${plane.base}/api/workspaces`, { headers: plane.auth });
+  assert.deepEqual(await listed.json(), { workspaces: [] });
+  await plane.close();
+});
+
 test("a computer bearer gets computer scope", async () => {
   const plane = await withPlane();
   const secret = `cmp_${randomBytes(16).toString("hex")}`;
