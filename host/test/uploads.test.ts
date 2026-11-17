@@ -84,7 +84,8 @@ test("https file uploads into a running guest", async () => {
       body: JSON.stringify({ desktopId, upload_token: started.upload_token }),
     });
     assert.equal(complete.status, 200);
-    assert.ok(plane.driver.writes.some((w) => w.path === "/tmp/a.txt"));
+    const driver = plane.driver as FakeDriver;
+    assert.ok(driver.writes.some((w) => w.path === "/tmp/a.txt"));
   } finally {
     if (priorOrigin === undefined) delete process.env.BOPS_UPLOAD_ORIGIN;
     else process.env.BOPS_UPLOAD_ORIGIN = priorOrigin;

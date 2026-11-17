@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { connect, type Duplex } from "node:net";
+import { connect } from "node:net";
+import type { Duplex } from "node:stream";
 import { who } from "./auth.ts";
 import type { IncusDriver } from "./incus.ts";
 import { HttpError, sendJson } from "./http.ts";

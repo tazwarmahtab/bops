@@ -405,9 +405,10 @@ export async function computerRoutes(
           sendJson(res, 200, { size, changed: false, restarted: false });
           return 200;
         }
+        const diskGb = body.disk_size_gb;
         const free = await driver.free();
         const maxDisk = computer.diskGb + free.diskGb;
-        if (body.disk_size_gb > maxDisk) {
+        if (diskGb > maxDisk) {
           sendJson(res, 409, {
             code: "disk_full",
             current_disk_gb: computer.diskGb,
@@ -415,11 +416,11 @@ export async function computerRoutes(
           });
           return 409;
         }
-        await driver.resizeDisk(computer.instance, body.disk_size_gb);
+        await driver.resizeDisk(computer.instance, diskGb);
         await store.update((file) => {
-          file.computers[resolvedId].diskGb = body.disk_size_gb;
+          file.computers[resolvedId].diskGb = diskGb;
         });
-        sendJson(res, 200, { disk_gb: body.disk_size_gb });
+        sendJson(res, 200, { disk_gb: diskGb });
         return 200;
       }
       return null;
