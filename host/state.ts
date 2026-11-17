@@ -70,6 +70,8 @@ export type Store = {
   update(fn: (file: PlaneFile) => void): Promise<PlaneFile | { error: "state_unreadable" }>;
 };
 
+class StoreLockBusy extends Error {}
+
 export function openStore(statePath: string): Store {
   const lockPath = join(dirname(statePath), "plane.lock");
   let queue: Promise<unknown> = Promise.resolve();
@@ -85,11 +87,15 @@ export function openStore(statePath: string): Store {
 
   async function acquire() {
     await mkdir(dirname(statePath), { recursive: true });
+    const started = Date.now();
     for (;;) {
       try {
         return await open(lockPath, "wx");
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        // Never steal a lock: a different process may still be writing.
+        // Fail closed after a bounded wait so requests cannot hang forever.
+        if (Date.now() - started >= 750) throw new StoreLockBusy("state lock busy");
         await new Promise((r) => setTimeout(r, 15));
       }
     }
@@ -126,6 +132,9 @@ export function openStore(statePath: string): Store {
           }
           return { error: "state_unreadable" as const };
         }
+      }).catch((error: unknown) => {
+        if (error instanceof StoreLockBusy) return { error: "state_unreadable" as const };
+        throw error;
       });
     },
     async update(fn) {
@@ -145,6 +154,9 @@ export function openStore(statePath: string): Store {
         fn(current);
         await commit(current);
         return current;
+      }).catch((error: unknown) => {
+        if (error instanceof StoreLockBusy) return { error: "state_unreadable" as const };
+        throw error;
       });
     },
   };
