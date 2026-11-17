@@ -73,4 +73,26 @@ test("a second process waits on plane.lock", async () => {
   assert.match(out, /done/);
 });
 
+
+test("a stale lock fails closed instead of hanging indefinitely", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bops-stale-lock-"));
+  const statePath = join(dir, "plane.json");
+  const store = openStore(statePath);
+  await store.update(() => {});
+  const lockPath = join(dir, "plane.lock");
+  const handle = await open(lockPath, "wx");
+  try {
+    const result = await Promise.race([
+      store.update(() => {}),
+      new Promise<{ error: string }>((resolve) => setTimeout(() => resolve({ error: "timeout" }), 1500)),
+    ]);
+    assert.deepEqual(result, { error: "state_unreadable" });
+  } finally {
+    await handle.close();
+    const { unlink, rm } = await import("node:fs/promises");
+    await unlink(lockPath).catch(() => undefined);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 void emptyFile;

@@ -70,6 +70,24 @@ test("fork is unavailable and clone checks free space", async () => {
   await plane.close();
 });
 
+
+test("clone startup failure removes the new instance without creating a computer row", async () => {
+  const { plane, driver, workspaceId, id } = await boot();
+  driver.startError = new Error("start failed");
+  const res = await fetch(`${plane.base}/api/computers/${id}/clone`, {
+    method: "POST",
+    headers: { ...plane.auth, "content-type": "application/json" },
+    body: JSON.stringify({ workspace_id: workspaceId }),
+  });
+  assert.equal(res.status, 503);
+  assert.equal(driver.cloned, 1);
+  assert.equal(driver.deleted.length, 1);
+  const file = await openStore(plane.statePath).read();
+  assert.ok(!("error" in file));
+  if (!("error" in file)) assert.deepEqual(Object.keys(file.computers), [id]);
+  await plane.close();
+});
+
 test("fork returns 409 even when Incus is down", async () => {
   const { plane, driver, id } = await boot();
   driver.versionError = new Error("incus down");

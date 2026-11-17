@@ -447,7 +447,14 @@ export async function computerRoutes(
         typeof body.name === "string" && body.name.length > 0 ? body.name : uniqueName(state, computer.name);
       if (nameTaken(state, name)) throw new HttpError(409, "name taken");
       const { instance } = await driver.clone(computer.instance, name);
-      await driver.start(instance);
+      try {
+        await driver.start(instance);
+      } catch {
+        // A failed clone must not leave a newly allocated instance behind.
+        await driver.delete(instance);
+        sendJson(res, 503, { code: "incus_down", error: "incus down" });
+        return 503;
+      }
       const id = newComputerId();
       const cloneComputer: Computer = {
         id,
