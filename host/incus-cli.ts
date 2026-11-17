@@ -1,0 +1,310 @@
+import { spawn } from "node:child_process";
+import type { ExecResult, IncusDriver } from "./incus.ts";
+
+export function execArgv(binary: string, instance: string, command: string, timeoutSec: number): string[] {
+  return [binary, "exec", instance, "--", "timeout", String(timeoutSec), "bash", "-lc", command];
+}
+
+function displayNum(screen: string): number {
+  if (screen === "default") return 99;
+  const m = /^screen-(\d+)$/.exec(screen);
+  return m ? Number(m[1]) : 99;
+}
+
+function shellQuote(text: string): string {
+  return `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function freeBytes(total: unknown, used: unknown): number | null {
+  if (typeof total !== "number" || typeof used !== "number") return null;
+  return total - used;
+}
+
+function diskGbFromPools(pools: Record<string, unknown>): number {
+  const pool = isRecord(pools.default) ? pools.default : Object.values(pools).find(isRecord);
+  if (!pool) return 0;
+  const space = pool.space;
+  if (!isRecord(space)) return 0;
+  const free = freeBytes(space.total, space.used);
+  return free === null ? 0 : Math.floor(free / 1e9);
+}
+
+export function incusInstanceName(displayName: string): string {
+  let slug = displayName
+    .trim()
+    .replace(/[^A-Za-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!slug || !/^[A-Za-z]/.test(slug)) {
+    const tail = slug.length > 0 ? slug : "x";
+    slug = `bops-${tail}`.replace(/[^A-Za-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  }
+  if (!/^[A-Za-z]/.test(slug)) slug = `bops-${slug || "x"}`;
+  slug = slug.slice(0, 63);
+  if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(slug)) slug = "bops-x";
+  return slug;
+}
+
+export function createInstanceArgv(
+  binary: string,
+  input: { image: string; name: string; cpu: number; ramMb: number; diskGb: number },
+): string[] {
+  const instance = incusInstanceName(input.name);
+  return [
+    binary,
+    "init",
+    input.image,
+    instance,
+    "-c",
+    `limits.cpu=${input.cpu}`,
+    "-c",
+    `limits.memory=${input.ramMb}MiB`,
+    "-d",
+    `root,size=${input.diskGb}GiB`,
+  ];
+}
+
+export function parseIncusFree(resources: unknown, storage?: unknown): { ramMb: number; diskGb: number } {
+  let ramMb = 0;
+  let diskGb = 0;
+  if (isRecord(resources)) {
+    const memory = resources.memory;
+    if (isRecord(memory)) {
+      const free = freeBytes(memory.total, memory.used);
+      if (free !== null) ramMb = Math.floor(free / (1024 * 1024));
+    }
+    const pools = isRecord(resources.storage) ? resources.storage.pools : undefined;
+    if (isRecord(pools)) diskGb = diskGbFromPools(pools);
+  }
+  if (diskGb === 0 && isRecord(storage)) {
+    const space = storage.space;
+    if (isRecord(space)) {
+      const free = freeBytes(space.total, space.used);
+      if (free !== null) diskGb = Math.floor(free / 1e9);
+    }
+  }
+  return { ramMb, diskGb };
+}
+
+function screenshotCmd(display: number, format: "jpeg" | "png", scale: number): { cmd: string; pull: string } {
+  const ext = format === "png" ? "png" : "jpg";
+  const capture = `/tmp/bops-shot.${ext}`;
+  const scalePct = Math.round(scale * 100);
+  if (scalePct === 100) {
+    return { cmd: `DISPLAY=:${display} scrot -o ${capture}`, pull: capture };
+  }
+  const pull = capture.replace(/(\.[^.]+)$/, "-thumb$1");
+  return { cmd: `DISPLAY=:${display} scrot -o ${capture} --thumb ${scalePct}`, pull };
+}
+
+export function cliDriver(binary = "incus"): IncusDriver {
+  async function run(args: string[]): Promise<ExecResult> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(binary, args, { shell: false });
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.setEncoding("utf8");
+      child.stderr?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk) => {
+        stdout += chunk;
+      });
+      child.stderr?.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      child.on("error", (err) => reject(err));
+      child.on("close", (code) => resolve({ exitCode: code ?? 1, stdout, stderr }));
+    });
+  }
+
+  async function pullFile(instance: string, path: string): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(binary, ["file", "pull", `${instance}${path}`, "-"], { shell: false });
+      const chunks: Buffer[] = [];
+      let stderr = "";
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      child.stdout?.on("data", (chunk) => {
+        chunks.push(chunk as Buffer);
+      });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code !== 0) reject(new Error(stderr || `pull failed with ${code}`));
+        else resolve(Buffer.concat(chunks));
+      });
+    });
+  }
+
+  const driver: IncusDriver = {
+    async version() {
+      const result = await run(["version"]);
+      if (result.exitCode !== 0) throw new Error(result.stderr || "incus down");
+      return result.stdout.trim().split("\n")[0] ?? "";
+    },
+
+    async free() {
+      const resources = await run(["info", "--resources", "--format", "json"]);
+      const storage = await run(["storage", "info", "default", "--format", "json"]);
+      const resourcesJson = resources.exitCode === 0 ? parseJson(resources.stdout) : null;
+      const storageJson = storage.exitCode === 0 ? parseJson(storage.stdout) : null;
+      if (resourcesJson === null && storageJson === null) return { ramMb: 0, diskGb: 0 };
+      return parseIncusFree(resourcesJson, storageJson ?? undefined);
+    },
+
+    async create(input) {
+      const instance = incusInstanceName(input.name);
+      const result = await run(createInstanceArgv(binary, input).slice(1));
+      if (result.exitCode !== 0) throw new Error(result.stderr || "create failed");
+      return { instance };
+    },
+
+    async start(instance) {
+      const result = await run(["start", instance]);
+      if (result.exitCode !== 0) throw new Error(result.stderr || "start failed");
+    },
+
+    async stop(instance) {
+      const result = await run(["stop", instance, "--force"]);
+      if (result.exitCode !== 0) throw new Error(result.stderr || "stop failed");
+    },
+
+    async restart(instance) {
+      const result = await run(["restart", instance, "--force"]);
+      if (result.exitCode !== 0) throw new Error(result.stderr || "restart failed");
+    },
+
+    async delete(instance) {
+      const result = await run(["delete", instance, "--force"]);
+      if (result.exitCode !== 0) throw new Error(result.stderr || "delete failed");
+    },
+
+    async clone(instance, name) {
+      const target = incusInstanceName(name);
+      const result = await run(["copy", instance, target]);
+      if (result.exitCode !== 0) throw new Error(result.stderr || "clone failed");
+      return { instance: target };
+    },
+
+    async resizeDisk(instance, diskGb) {
+      const result = await run(["config", "device", "set", instance, "root", "size", `${diskGb}GiB`]);
+      if (result.exitCode !== 0) throw new Error(result.stderr || "resize failed");
+    },
+
+    async exec(instance, command, timeoutSec): Promise<ExecResult> {
+      const argv = execArgv(binary, instance, command, timeoutSec);
+      const [cmd, ...args] = argv;
+      return new Promise((resolve) => {
+        const child = spawn(cmd, args, { shell: false });
+        let stdout = "";
+        let stderr = "";
+        let settled = false;
+        const finish = (result: ExecResult) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(result);
+        };
+        child.stdout?.setEncoding("utf8");
+        child.stderr?.setEncoding("utf8");
+        child.stdout?.on("data", (chunk) => {
+          stdout += chunk;
+        });
+        child.stderr?.on("data", (chunk) => {
+          stderr += chunk;
+        });
+        child.on("error", (err) => finish({ exitCode: 1, stdout, stderr: `${stderr}${err.message}` }));
+        child.on("close", (code) => finish({ exitCode: code ?? 1, stdout, stderr }));
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          finish({ exitCode: 124, stdout, stderr });
+        }, timeoutSec * 1000);
+      });
+    },
+
+    async screenshot(instance, screen, format, scale) {
+      const display = displayNum(screen);
+      const { cmd, pull } = screenshotCmd(display, format, scale);
+      const shot = await driver.exec(instance, cmd, 20);
+      if (shot.exitCode !== 0) throw new Error(shot.stderr || "screenshot failed");
+      return pullFile(instance, pull);
+    },
+
+    async input(instance, kind, body, screen) {
+      const display = displayNum(screen);
+      let cmd = "";
+      if (kind === "click") {
+        const click = body as { x?: number; y?: number };
+        const x = click.x ?? 0;
+        const y = click.y ?? 0;
+        cmd = `DISPLAY=:${display} xdotool mousemove ${x} ${y} click 1`;
+      } else if (kind === "type") {
+        const typed = body as { text?: string };
+        cmd = `DISPLAY=:${display} xdotool type --delay 12 -- ${shellQuote(typed.text ?? "")}`;
+      } else if (kind === "key") {
+        const keyed = body as { keys?: string };
+        cmd = `DISPLAY=:${display} xdotool key -- ${shellQuote(keyed.keys ?? "")}`;
+      } else {
+        const never: never = kind;
+        throw new Error(`unknown input kind ${never}`);
+      }
+      const result = await driver.exec(instance, cmd, 20);
+      if (result.exitCode !== 0) throw new Error(result.stderr || "input failed");
+    },
+
+    async writeFile(instance, path, contents, mode) {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(binary, ["file", "push", "-", `${instance}${path}`], { shell: false });
+        child.stdin?.write(contents);
+        child.stdin?.end();
+        child.on("error", reject);
+        child.on("close", (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`file push failed with ${code}`));
+        });
+      });
+      const modeOct = mode.toString(8).padStart(4, "0");
+      const chmod = await driver.exec(instance, `chmod ${modeOct} ${shellQuote(path)}`, 30);
+      if (chmod.exitCode !== 0) throw new Error(chmod.stderr || "chmod failed");
+    },
+
+    async vncPort(instance, screenId) {
+      const display = displayNum(screenId);
+      const fromConfig = await run(["config", "get", instance, `user.bops.vnc.${display}`]);
+      if (fromConfig.exitCode === 0 && fromConfig.stdout.trim()) {
+        const port = Number(fromConfig.stdout.trim());
+        if (Number.isFinite(port) && port > 0) return port;
+      }
+      const fallback: Record<string, number> = {
+        default: 5900,
+        "screen-100": 5901,
+        "screen-101": 5902,
+        "screen-102": 5903,
+      };
+      return fallback[screenId] ?? 5900;
+    },
+
+    async sshPort(instance) {
+      const device = await run(["config", "device", "get", instance, "ssh", "listen"]);
+      if (device.exitCode !== 0 || !device.stdout.trim()) return null;
+      const listen = device.stdout.trim();
+      const portPart = listen.includes(":") ? listen.slice(listen.lastIndexOf(":") + 1) : listen;
+      const port = Number(portPart);
+      return Number.isFinite(port) && port > 0 ? port : null;
+    },
+  };
+
+  return driver;
+}

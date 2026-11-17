@@ -55,3 +55,6 @@ next-env.d.ts
 # Bops Cloud installs its two dependencies here on its box
 /cloud/node_modules
 .scratch/
+
+# local git worktrees
+.worktrees/
